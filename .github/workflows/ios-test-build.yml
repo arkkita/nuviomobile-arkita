@@ -11,6 +11,11 @@ on:
           - Debug
           - Release
         default: Release
+      publish_to_source:
+        description: Publish the IPA to the Feather/AltStore source link
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -114,3 +119,105 @@ jobs:
           path: build/ios-ipa/*.ipa
           if-no-files-found: error
           retention-days: 7
+
+  publish:
+    name: Publish IPA to sideload source
+    needs: build
+    if: inputs.publish_to_source
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      IOS_CONFIGURATION: ${{ inputs.configuration }}
+      RELEASE_TAG: sideload-latest
+      SOURCE_BRANCH: sideload-source
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Download test IPA
+        uses: actions/download-artifact@v8
+        with:
+          name: nuvio-test-${{ inputs.configuration }}-ipa-${{ github.sha }}
+          path: ipa
+
+      - name: Publish IPA release
+        run: |
+          ipa_path="$(find ipa -maxdepth 1 -type f -name '*.ipa' -print -quit)"
+          if [[ -z "${ipa_path}" ]]; then
+            echo "No IPA was downloaded." >&2
+            exit 1
+          fi
+          echo "IPA_PATH=${ipa_path}" >> "${GITHUB_ENV}"
+
+          gh release delete "${RELEASE_TAG}" --cleanup-tag --yes || true
+          gh release create "${RELEASE_TAG}" "${ipa_path}" \
+            --target "${GITHUB_SHA}" \
+            --prerelease \
+            --title "Sideload build (${IOS_CONFIGURATION})" \
+            --notes "Unsigned ${IOS_CONFIGURATION} IPA built from ${GITHUB_REF_NAME} at ${GITHUB_SHA::7}. Install it through the sideload source."
+
+      - name: Build sideload source
+        run: |
+          version="$(sed -nE 's/^[[:space:]]*MARKETING_VERSION[[:space:]]*=[[:space:]]*([^[:space:]#]+).*$/\1/p' iosApp/Configuration/Version.xcconfig | head -n 1)"
+          ipa_name="$(basename "${IPA_PATH}")"
+          icon_url="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/iosApp/iosApp/Assets.xcassets/AppIcon.appiconset/app-icon-1024.png"
+          template="${RUNNER_TEMP}/source-template.json"
+          notes="${RUNNER_TEMP}/source-notes.md"
+
+          jq -n --arg icon "${icon_url}" --arg website "https://github.com/${GITHUB_REPOSITORY}" '{
+            name: "Nuvio (arkita)",
+            subtitle: "Personal Nuvio Enhanced builds.",
+            description: "Unsigned builds of this fork, published by its Build Test IPA workflow.",
+            website: $website,
+            iconURL: $icon,
+            tintColor: "#1E88E5",
+            featuredApps: ["com.nuvio.media"],
+            apps: [{
+              name: "Nuvio (arkita)",
+              bundleIdentifier: "com.nuvio.media",
+              developerName: "arkita",
+              subtitle: "Personal Nuvio Enhanced build.",
+              localizedDescription: "Nuvio Enhanced built from this fork.",
+              iconURL: $icon,
+              tintColor: "#1E88E5",
+              category: "entertainment",
+              versions: [],
+              appPermissions: { entitlements: [], privacy: {} }
+            }],
+            news: []
+          }' > "${template}"
+
+          printf '%s build from %s at %s.\n' "${IOS_CONFIGURATION}" "${GITHUB_REF_NAME}" "${GITHUB_SHA::7}" > "${notes}"
+
+          python3 scripts/update-store-source.py \
+            --source "${template}" \
+            --output "${RUNNER_TEMP}/source.json" \
+            --ipa "${IPA_PATH}" \
+            --release-notes "${notes}" \
+            --release-version "${version}" \
+            --release-date "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+            --download-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${ipa_name}"
+
+      - name: Publish sideload source
+        run: |
+          publish_dir="${RUNNER_TEMP}/source-branch"
+          mkdir -p "${publish_dir}"
+          cp "${RUNNER_TEMP}/source.json" "${publish_dir}/source.json"
+          cd "${publish_dir}"
+          git init -q -b "${SOURCE_BRANCH}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add source.json
+          git commit -q -m "Update sideload source to ${GITHUB_SHA::7}"
+          git push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${SOURCE_BRANCH}"
+
+          {
+            echo "## Sideload source"
+            echo
+            echo "Add this URL as a source in Feather:"
+            echo
+            echo "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${SOURCE_BRANCH}/source.json"
+          } >> "${GITHUB_STEP_SUMMARY}"
