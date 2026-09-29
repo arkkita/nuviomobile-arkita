@@ -220,7 +220,7 @@ extension MPVPlayerViewController {
             suspendVideoTrackForBackground(reason: "background-without-pip")
             return
         }
-        pausePlayback()
+        // Keep audio playing in the background; only drop the video track so no GPU work runs.
         setStringProperty("vid", "no")
     }
 
@@ -235,14 +235,18 @@ extension MPVPlayerViewController {
             if isPictureInPictureActive() || isPictureInPictureStarting { return }
             restoreVideoTrackAfterBackgroundIfNeeded()
             primaryRenderSurface?.requestRenderBurst(reason: "foreground", count: 4)
-            playPlayback()
+            if !getFlag("pause") {
+                playPlayback()
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
                 self?.prewarmAutomaticPictureInPictureSource(reason: "foreground")
             }
             return
         }
         setStringProperty("vid", "auto")
-        playPlayback()
+        if !getFlag("pause") {
+            playPlayback()
+        }
     }
 
     func isPictureInPictureSupported() -> Bool {
@@ -406,7 +410,6 @@ extension MPVPlayerViewController {
             )
             return
         }
-        pausePlayback()
         guard !videoTrackSuspendedForBackground else { return }
         setStringProperty("vid", "no")
         videoTrackSuspendedForBackground = true
@@ -671,6 +674,14 @@ extension MPVPlayerViewController: PictureInPictureControllerDelegate {
             )
             playPlayback()
             controller.invalidatePlaybackState()
+            return
+        }
+
+        if !controller.isActive, !controller.isStartPending, UIApplication.shared.applicationState == .background {
+            InAppLogBridge.shared.debug(
+                tag: "PiP/iOS",
+                message: "Ignoring AVKit pause request while backgrounded without an active PiP window"
+            )
             return
         }
 
