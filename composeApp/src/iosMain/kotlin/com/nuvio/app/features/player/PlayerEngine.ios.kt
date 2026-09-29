@@ -69,6 +69,9 @@ actual fun PlatformPlayerSurface(
     PlayerSettingsRepository.ensureLoaded()
     val playerSettings by PlayerSettingsRepository.uiState.collectAsStateWithLifecycle()
     val latestPlayerSettings = rememberUpdatedState(playerSettings)
+    val latestInitialPositionMs = rememberUpdatedState(initialPositionMs)
+    val latestInitialPositionRequestKey = rememberUpdatedState(initialPositionRequestKey)
+    val latestOnInitialPositionHandled = rememberUpdatedState(onInitialPositionHandled)
     val experimentalSinglePrimaryPictureInPictureEnabled =
         IosExperimentalPictureInPictureSettingsStorage.loadSinglePrimaryRendererEnabled()
 
@@ -377,12 +380,19 @@ actual fun PlatformPlayerSurface(
                 "hwdec=${latestPlayerSettings.value.iosHardwareDecoderMode.mpvValue} toneMapping=${latestPlayerSettings.value.iosToneMappingMode.mpvValue}",
         )
         bridge.applyIosVideoOutputSettings(latestPlayerSettings.value)
+        // Open the file directly at the resume point (like ExoPlayer's start position on Android)
+        // instead of buffering from 0 and seeking once it has loaded.
+        val startPositionMs = latestInitialPositionMs.value?.takeIf { it > 0L }
         bridge.loadFileWithAudio(
             videoUrl = sourceUrl,
             audioUrl = sourceAudioUrl,
             headersJson = encodePlaybackHeadersForBridge(sourceHeaders),
             subtitlesJson = encodeExternalSubtitlesForBridge(externalSubtitles),
+            startPositionMs = startPositionMs ?: 0L,
         )
+        latestInitialPositionRequestKey.value?.let { key ->
+            latestOnInitialPositionHandled.value(key, startPositionMs != null)
+        }
         if (playWhenReady) {
             InAppLogger.debug("Player/iOS", "initial play requested")
             bridge.play()

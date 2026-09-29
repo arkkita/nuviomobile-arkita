@@ -32,12 +32,19 @@ final class MPVPlayerBridgeImpl: NSObject, NuvioPlayerBridge {
     }
 
     func loadFile(url: String) { ensurePlayerViewController().loadFile(url) }
-    func loadFileWithAudio(videoUrl: String, audioUrl: String?, headersJson: String?, subtitlesJson: String?) {
+    func loadFileWithAudio(
+        videoUrl: String,
+        audioUrl: String?,
+        headersJson: String?,
+        subtitlesJson: String?,
+        startPositionMs: Int64
+    ) {
         ensurePlayerViewController().loadFile(
             videoUrl,
             audioUrl: audioUrl,
             requestHeaders: parseRequestHeaders(headersJson),
-            subtitles: parseSubtitles(subtitlesJson)
+            subtitles: parseSubtitles(subtitlesJson),
+            startPositionMs: startPositionMs
         )
     }
 
@@ -275,6 +282,9 @@ private struct PendingLoadRequest {
     let requestHeaders: [String: String]
     let subtitles: [PluginSubtitle]
     let queuedAtUptime: TimeInterval
+    /// Where to start the file, applied as a per-file `loadfile` option so mpv opens straight
+    /// at the resume point instead of buffering from 0 and seeking afterwards.
+    var startPositionSeconds: Double? = nil
 }
 
 // MARK: - MPV Player View Controller
@@ -446,6 +456,9 @@ final class MPVPlayerViewController: UIViewController {
     var automaticPictureInPictureTimeoutWorkItem: DispatchWorkItem?
     var automaticPictureInPictureBackgroundTask: UIBackgroundTaskIdentifier = .invalid
     var videoTrackSuspendedForBackground = false
+    var backgroundVideoTrackDropWorkItem: DispatchWorkItem?
+    var videoTrackDroppedForBackground = false
+    var hardwareDecoderBeforeBackground = ""
     var resumePlaybackAfterPictureInPictureRestore = false
     var pipRestoreResumeWorkItem: DispatchWorkItem?
     var preservePlaybackDuringPictureInPictureStart = false
@@ -779,13 +792,20 @@ final class MPVPlayerViewController: UIViewController {
 
     // MARK: - Playback API
 
-    func loadFile(_ urlString: String, audioUrl: String? = nil, requestHeaders: [String: String] = [:], subtitles: [PluginSubtitle] = []) {
+    func loadFile(
+        _ urlString: String,
+        audioUrl: String? = nil,
+        requestHeaders: [String: String] = [:],
+        subtitles: [PluginSubtitle] = [],
+        startPositionMs: Int64 = 0
+    ) {
         let request = PendingLoadRequest(
             urlString: urlString,
             audioUrl: audioUrl,
             requestHeaders: requestHeaders,
             subtitles: subtitles,
-            queuedAtUptime: ProcessInfo.processInfo.systemUptime
+            queuedAtUptime: ProcessInfo.processInfo.systemUptime,
+            startPositionSeconds: startPositionMs > 0 ? Double(startPositionMs) / 1000.0 : nil
         )
 
         if Thread.isMainThread {
@@ -814,7 +834,11 @@ final class MPVPlayerViewController: UIViewController {
         pendingLoadRequest = nil
         pendingLoadRetryWorkItem?.cancel()
         pendingLoadRetryWorkItem = nil
-        lastLoadRequest = request
+        // Reloads (retry / device-loss recovery) restore their own position, so don't replay the
+        // original start offset for them.
+        var reloadableRequest = request
+        reloadableRequest.startPositionSeconds = nil
+        lastLoadRequest = reloadableRequest
         cancelPendingDeviceLossResume()
         hasGivenUpOnDeviceLossRecovery = false
         deviceLossRecoveryAttempts = 0
@@ -845,7 +869,15 @@ final class MPVPlayerViewController: UIViewController {
         isPlayerEnded = false
         playbackStateGeneration &+= 1
         invalidateMediaInfoCache()
-        command("loadfile", args: [request.urlString, "replace"])
+        if let startSeconds = request.startPositionSeconds {
+            // mpv >= 0.38 syntax: loadfile <url> <flags> <index> <options>
+            command(
+                "loadfile",
+                args: [request.urlString, "replace", "-1", "start=\(String(format: "%.3f", startSeconds))"]
+            )
+        } else {
+            command("loadfile", args: [request.urlString, "replace"])
+        }
         if let audioUrl = request.audioUrl, !audioUrl.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
                 self?.command("audio-add", args: [audioUrl, "select"], checkForErrors: false)
@@ -1182,6 +1214,9 @@ final class MPVPlayerViewController: UIViewController {
         pendingLoadRetryWorkItem = nil
         pendingLoadRequest = nil
         videoTrackSuspendedForBackground = false
+        backgroundVideoTrackDropWorkItem?.cancel()
+        backgroundVideoTrackDropWorkItem = nil
+        videoTrackDroppedForBackground = false
 
         mpvQueue.async { [weak self, eventQueue, metalLayer] in
             eventQueue.sync {}
@@ -2284,6 +2319,10 @@ final class MPVPlayerViewController: UIViewController {
         let str: String? = cstr == nil ? nil : String(cString: cstr!)
         mpv_free(cstr)
         return str
+    }
+
+    func currentHardwareDecoder() -> String {
+        getString("hwdec-current") ?? ""
     }
 
     func getFlag(_ name: String) -> Bool {

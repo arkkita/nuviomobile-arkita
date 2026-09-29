@@ -48,6 +48,7 @@ class MetalLayer: CAMetalLayer {
 
     private var isRenderingSuspended = false
     private var isSuspensionLatched = false
+    private var isSuspendedProbeAllowed = true
     private var consecutiveAcquisitionFailures = 0
     private var lastSuspendedProbeTime: CFTimeInterval = 0
 
@@ -79,11 +80,14 @@ class MetalLayer: CAMetalLayer {
         }
     }
 
-    func setRenderingSuspended(_ suspended: Bool, reason: String) {
+    /// `allowProbe: false` keeps drawable acquisition fully off while suspended (e.g. in the
+    /// background, where any rendered frame would be GPU work iOS denies).
+    func setRenderingSuspended(_ suspended: Bool, reason: String, allowProbe: Bool = true) {
         captureLock.lock()
         let changed = isRenderingSuspended != suspended
         isRenderingSuspended = suspended
         isSuspensionLatched = suspended
+        isSuspendedProbeAllowed = allowProbe
         consecutiveAcquisitionFailures = 0
         lastSuspendedProbeTime = suspended ? CACurrentMediaTime() : 0
         let stale = pendingDrawable
@@ -108,7 +112,8 @@ class MetalLayer: CAMetalLayer {
         nextDrawableCallCount &+= 1
         if isRenderingSuspended {
             let now = CACurrentMediaTime()
-            let shouldProbe = now - lastSuspendedProbeTime >= Self.suspendedRetryInterval
+            let shouldProbe = isSuspendedProbeAllowed &&
+                now - lastSuspendedProbeTime >= Self.suspendedRetryInterval
             if shouldProbe {
                 lastSuspendedProbeTime = now
             }

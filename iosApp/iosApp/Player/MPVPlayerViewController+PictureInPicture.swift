@@ -220,8 +220,58 @@ extension MPVPlayerViewController {
             suspendVideoTrackForBackground(reason: "background-without-pip")
             return
         }
-        // Keep audio playing in the background; only drop the video track so no GPU work runs.
-        setStringProperty("vid", "no")
+        // Keep audio playing in the background. Stop drawing right away so no GPU work runs, but
+        // hold on to the video track for a short grace period: re-selecting it forces a refresh
+        // seek that stalls playback for a moment, which is what a quick Notification Center peek
+        // would otherwise hit on return. Only drop the track if we stay in the background.
+        if !isAwaitingDeviceLossRecovery {
+            metalLayer.setRenderingSuspended(true, reason: "enter-background", allowProbe: false)
+        }
+        hardwareDecoderBeforeBackground = currentHardwareDecoder()
+        scheduleBackgroundVideoTrackDrop()
+    }
+
+    private static let backgroundVideoTrackGracePeriod: TimeInterval = 8
+
+    private func scheduleBackgroundVideoTrackDrop() {
+        backgroundVideoTrackDropWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.backgroundVideoTrackDropWorkItem = nil
+            guard self.mpv != nil, UIApplication.shared.applicationState == .background else { return }
+            self.setStringProperty("vid", "no")
+            self.videoTrackDroppedForBackground = true
+            InAppLogBridge.shared.info(
+                tag: "MPV/iOS",
+                message: "Video track dropped after staying in background"
+            )
+        }
+        backgroundVideoTrackDropWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.backgroundVideoTrackGracePeriod,
+            execute: workItem
+        )
+    }
+
+    private func restoreVideoAfterBackground() {
+        backgroundVideoTrackDropWorkItem?.cancel()
+        backgroundVideoTrackDropWorkItem = nil
+        if videoTrackDroppedForBackground {
+            videoTrackDroppedForBackground = false
+            setStringProperty("vid", "auto")
+            return
+        }
+        // Back within the grace period: the track never changed, so there is nothing to reload
+        // unless the hardware decoder gave up while we were away.
+        let decoderBefore = hardwareDecoderBeforeBackground
+        let decoderNow = currentHardwareDecoder()
+        if !decoderBefore.isEmpty, decoderBefore != "no", decoderNow.isEmpty || decoderNow == "no" {
+            InAppLogBridge.shared.warn(
+                tag: "MPV/iOS",
+                message: "Hardware decoder lost in background (\(decoderBefore) -> \(decoderNow)); reloading video"
+            )
+            command("video-reload", checkForErrors: false)
+        }
     }
 
     @objc func enterForeground() {
@@ -243,7 +293,7 @@ extension MPVPlayerViewController {
             }
             return
         }
-        setStringProperty("vid", "auto")
+        restoreVideoAfterBackground()
         if !getFlag("pause") {
             playPlayback()
         }
