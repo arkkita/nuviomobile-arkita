@@ -3,6 +3,11 @@ package com.nuvio.app.features.tmdb
 import co.touchlab.kermit.Logger
 import com.nuvio.app.core.logging.InAppLogger
 import com.nuvio.app.features.addons.httpGetText
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.SerialName
@@ -15,6 +20,10 @@ object TmdbService {
     private val imdbToTmdbCache = linkedMapOf<String, String>()
     private val tmdbToImdbCache = linkedMapOf<String, String>()
     private val cacheMutex = Mutex()
+    // Concurrent scrapers resolve the same IMDb id at once; share one in-flight lookup per key
+    // (guarded by cacheMutex) instead of issuing N identical TMDB find requests.
+    private val inflightScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val inflightImdbToTmdb = mutableMapOf<String, CompletableDeferred<String?>>()
 
     suspend fun ensureTmdbId(videoId: String, mediaType: String, fallbackImdbId: String? = null): String? {
         val apiKey = TmdbSettingsRepository.effectiveApiKey()
@@ -79,13 +88,45 @@ object TmdbService {
     private suspend fun imdbToTmdb(imdbId: String, mediaType: String, apiKey: String): String? {
         val normalizedType = normalizeMediaType(mediaType)
         val cacheKey = "$imdbId:$normalizedType"
-        cacheMutex.withLock {
+        val inflightKey = "$cacheKey:$apiKey"
+        val deferred = cacheMutex.withLock {
             imdbToTmdbCache[cacheKey]?.let {
                 InAppLogger.debug("Metadata/TMDB", "cache hit imdbToTmdb key=$cacheKey")
                 return it
             }
+            inflightImdbToTmdb[inflightKey] ?: CompletableDeferred<String?>().also { created ->
+                inflightImdbToTmdb[inflightKey] = created
+                inflightScope.launch {
+                    try {
+                        created.complete(
+                            fetchImdbToTmdb(
+                                imdbId = imdbId,
+                                normalizedType = normalizedType,
+                                cacheKey = cacheKey,
+                                apiKey = apiKey,
+                            ),
+                        )
+                    } catch (error: Throwable) {
+                        created.completeExceptionally(error)
+                    } finally {
+                        cacheMutex.withLock {
+                            if (inflightImdbToTmdb[inflightKey] === created) {
+                                inflightImdbToTmdb.remove(inflightKey)
+                            }
+                        }
+                    }
+                }
+            }
         }
+        return deferred.await()
+    }
 
+    private suspend fun fetchImdbToTmdb(
+        imdbId: String,
+        normalizedType: String,
+        cacheKey: String,
+        apiKey: String,
+    ): String? {
         val body = fetch<TmdbFindResponse>(
             endpoint = "find/$imdbId",
             apiKey = apiKey,

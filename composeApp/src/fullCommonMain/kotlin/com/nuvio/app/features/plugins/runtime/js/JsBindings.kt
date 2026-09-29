@@ -190,7 +190,12 @@ internal object JsBindings {
             var followRedirects = options.redirect !== 'manual';
             var result = await __native_fetch(url, method, JSON.stringify(headers), body.kind, body.value, followRedirects);
             var parsed = JSON.parse(result);
-            var responseBytes = __fetch_base64_to_bytes(parsed.bodyBase64);
+            // Decode the binary body lazily: most plugins only read text()/json().
+            var responseBytes = null;
+            var getResponseBytes = function() {
+                if (responseBytes === null) responseBytes = __fetch_base64_to_bytes(parsed.bodyBase64);
+                return responseBytes;
+            };
             return {
                 ok: parsed.ok,
                 status: parsed.status,
@@ -202,9 +207,14 @@ internal object JsBindings {
                     }
                 },
                 arrayBuffer: function() {
-                    var copy = new Uint8Array(responseBytes.length);
-                    copy.set(responseBytes);
-                    return Promise.resolve(copy.buffer);
+                    try {
+                        var bytes = getResponseBytes();
+                        var copy = new Uint8Array(bytes.length);
+                        copy.set(bytes);
+                        return Promise.resolve(copy.buffer);
+                    } catch (e) {
+                        return Promise.reject(e);
+                    }
                 },
                 text: function() { return Promise.resolve(parsed.body); },
                 json: function() {

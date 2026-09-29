@@ -3,6 +3,8 @@ package com.nuvio.app.features.debrid
 import com.nuvio.app.features.streams.AddonStreamGroup
 import com.nuvio.app.features.streams.StreamDebridCacheState
 import com.nuvio.app.features.streams.StreamItem
+import kotlinx.atomicfu.locks.SynchronizedObject
+import kotlinx.atomicfu.locks.synchronized
 
 object DebridStreamPresentation {
     private val formatter = DebridStreamFormatter()
@@ -150,6 +152,33 @@ object DebridStreamPresentation {
 }
 
 internal object DebridStreamMetadata {
+    // Stream facts are computed for every stream on every publish, so compiled patterns are
+    // reused instead of rebuilding dozens of Regex objects per stream. Token/resolution inputs are
+    // fixed constants in this file, so the caches stay small.
+    private val regexCacheLock = SynchronizedObject()
+    private val tokenRegexCache = mutableMapOf<String, Regex>()
+    private val resolutionRegexCache = mutableMapOf<String, Regex>()
+    private val dolbyVisionTextRegex = Regex("(^|[^a-z0-9])(dv|dovi|dolby[ ._-]?vision)([^a-z0-9]|\$)")
+    private val hdrTextRegex = Regex("(^|[^a-z0-9])(hdr|hdr10|hdr10plus|hdr10\\+|hlg)([^a-z0-9]|\$)")
+    private val releaseGroupRegex = Regex("-([a-z0-9][a-z0-9._]{1,24})($|\\.)", RegexOption.IGNORE_CASE)
+    private val nonAlphanumericRegex = Regex("[^a-z0-9]")
+    private val nonAlphanumericPlusRegex = Regex("[^a-z0-9+]")
+
+    private fun tokenRegex(token: String): Regex = synchronized(regexCacheLock) {
+        tokenRegexCache.getOrPut(token) {
+            Regex("(^|[^a-z0-9])${Regex.escape(token.lowercase())}([^a-z0-9]|\$)")
+        }
+    }
+
+    private fun resolutionRegex(tokens: Array<out String>): Regex {
+        val alternation = tokens.joinToString("|")
+        return synchronized(regexCacheLock) {
+            resolutionRegexCache.getOrPut(alternation) {
+                Regex("(^|[^a-z0-9])($alternation)([^a-z0-9]|\$)")
+            }
+        }
+    }
+
     fun effectivePreferences(settings: DebridSettings): DebridStreamPreferences {
         val default = DebridStreamPreferences()
         if (settings.streamPreferences != default) return settings.streamPreferences.normalized()
@@ -304,9 +333,9 @@ internal object DebridStreamMetadata {
         val text = (parsedHdr + searchText).joinToString(" ").lowercase()
         val tags = mutableListOf<DebridStreamVisualTag>()
         val hasDv = parsedHdr.any { it.isDolbyVisionToken() } ||
-            Regex("(^|[^a-z0-9])(dv|dovi|dolby[ ._-]?vision)([^a-z0-9]|\$)").containsMatchIn(searchText)
+            dolbyVisionTextRegex.containsMatchIn(searchText)
         val hasHdr = parsedHdr.any { it.isHdrToken() } ||
-            Regex("(^|[^a-z0-9])(hdr|hdr10|hdr10plus|hdr10\\+|hlg)([^a-z0-9]|\$)").containsMatchIn(searchText)
+            hdrTextRegex.containsMatchIn(searchText)
         if (hasDv && hasHdr) tags += DebridStreamVisualTag.HDR_DV
         if (hasDv && !hasHdr) tags += DebridStreamVisualTag.DV_ONLY
         if (hasHdr && !hasDv) tags += DebridStreamVisualTag.HDR_ONLY
@@ -373,7 +402,7 @@ internal object DebridStreamMetadata {
     }
 
     private fun releaseGroupFromText(text: String): String =
-        Regex("-([a-z0-9][a-z0-9._]{1,24})($|\\.)", RegexOption.IGNORE_CASE)
+        releaseGroupRegex
             .find(text)
             ?.groupValues
             ?.getOrNull(1)
@@ -388,18 +417,18 @@ internal object DebridStreamMetadata {
         values.minOfOrNull { rank(it, preferred) } ?: Int.MAX_VALUE
 
     private fun String.hasResolutionToken(vararg tokens: String): Boolean =
-        Regex("(^|[^a-z0-9])(${tokens.joinToString("|")})([^a-z0-9]|\$)").containsMatchIn(this)
+        resolutionRegex(tokens).containsMatchIn(this)
 
     private fun String.hasToken(token: String): Boolean =
-        Regex("(^|[^a-z0-9])${Regex.escape(token.lowercase())}([^a-z0-9]|\$)").containsMatchIn(lowercase())
+        tokenRegex(token).containsMatchIn(lowercase())
 
     private fun String.isDolbyVisionToken(): Boolean {
-        val normalized = lowercase().replace(Regex("[^a-z0-9]"), "")
+        val normalized = lowercase().replace(nonAlphanumericRegex, "")
         return normalized == "dv" || normalized == "dovi" || normalized == "dolbyvision"
     }
 
     private fun String.isHdrToken(): Boolean {
-        val normalized = lowercase().replace(Regex("[^a-z0-9+]"), "")
+        val normalized = lowercase().replace(nonAlphanumericPlusRegex, "")
         return normalized == "hdr" ||
             normalized == "hdr10" ||
             normalized == "hdr10+" ||

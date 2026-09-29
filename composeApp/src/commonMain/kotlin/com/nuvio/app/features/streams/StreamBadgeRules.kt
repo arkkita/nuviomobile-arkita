@@ -1,5 +1,7 @@
 package com.nuvio.app.features.streams
 
+import kotlinx.atomicfu.locks.SynchronizedObject
+import kotlinx.atomicfu.locks.synchronized
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
@@ -183,7 +185,25 @@ internal object StreamBadgeRulesParser {
     }
 }
 
+private const val MAX_CACHED_BADGE_PATTERNS = 1024
+
 object StreamBadgeMatcher {
+    // compile() runs for every published stream group; reuse compiled user patterns (including
+    // remembering invalid ones) instead of recompiling every rule on each call.
+    private val patternCacheLock = SynchronizedObject()
+    private val patternCache = mutableMapOf<String, Regex?>()
+
+    private fun compiledPattern(pattern: String): Regex? = synchronized(patternCacheLock) {
+        if (patternCache.containsKey(pattern)) {
+            patternCache[pattern]
+        } else {
+            if (patternCache.size >= MAX_CACHED_BADGE_PATTERNS) patternCache.clear()
+            val regex = runCatching { Regex(pattern) }.getOrNull()
+            patternCache[pattern] = regex
+            regex
+        }
+    }
+
     fun compile(rules: StreamBadgeRules): List<CompiledStreamBadgeFilter> {
         if (!rules.hasImport) return emptyList()
         return rules.normalized().imports.filter { it.isActive }.flatMap { import ->
@@ -191,7 +211,7 @@ object StreamBadgeMatcher {
                 if (!filter.isEnabled || filter.name.isBlank() || filter.pattern.isBlank()) {
                     return@mapNotNull null
                 }
-                val regex = runCatching { Regex(filter.pattern) }.getOrNull() ?: return@mapNotNull null
+                val regex = compiledPattern(filter.pattern) ?: return@mapNotNull null
                 CompiledStreamBadgeFilter(
                     name = filter.name,
                     badge = StreamBadge(

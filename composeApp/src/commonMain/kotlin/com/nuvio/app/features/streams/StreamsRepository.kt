@@ -276,6 +276,44 @@ object StreamsRepository {
                 ).firstOrNull() ?: badgeGroup
             }
 
+            // Full (non binge-group-only) auto-play evaluation shared by the timeout, per-response
+            // and final selection paths so they cannot diverge.
+            fun evaluateFullAutoPlay(allStreams: List<StreamItem>): StreamAutoPlayEvaluation =
+                StreamAutoPlaySelector.evaluateAutoPlayStream(
+                    streams = allStreams,
+                    mode = autoPlayMode,
+                    regexPattern = playerSettings.streamAutoPlayRegex,
+                    source = playerSettings.streamAutoPlaySource,
+                    installedAddonNames = installedAddonNames,
+                    selectedAddons = playerSettings.streamAutoPlaySelectedAddons,
+                    selectedPlugins = playerSettings.streamAutoPlaySelectedPlugins,
+                    preferredBingeGroup = persistedBingeGroup,
+                    preferBingeGroupInSelection = persistedBingeGroup != null,
+                    bingeGroupOnly = false,
+                    debridEnabled = debridSettings.canResolvePlayableLinks,
+                    activeResolverProviderId = debridSettings.activeResolverProviderId,
+                )
+
+            // Once the timeout has elapsed (immediately for instant/unlimited, or after a bounded
+            // timeout whose selection was deferred), select as soon as a ready stream exists instead
+            // of waiting for every source. Only commits to a stream; giving up (hiding the overlay
+            // when nothing matches) is still left to the timeout/final fallback paths.
+            fun tryFullAutoSelectAfterTimeout() {
+                if (!isDirectAutoPlayFlow || !timeoutElapsed || autoSelectTriggered) return
+                val allStreams = _uiState.value.groups.flatMap { it.streams }
+                if (allStreams.isEmpty()) return
+                val evaluation = evaluateFullAutoPlay(allStreams)
+                val selected = evaluation.stream ?: return
+                if (autoSelectTriggered) return
+                autoSelectTriggered = true
+                _uiState.update {
+                    it.copy(
+                        autoPlayStream = selected,
+                        autoPlayCandidates = evaluation.readyStreams,
+                    )
+                }
+            }
+
             fun publishAddonGroup(group: AddonStreamGroup) {
                 _uiState.update { current ->
                     val updated = StreamAutoPlaySelector.orderAddonStreams(
@@ -345,6 +383,7 @@ object StreamsRepository {
                             }
                         }
                     }
+                    tryFullAutoSelectAfterTimeout()
                 }
                 debridAvailabilityJobs += availabilityJob
             }
@@ -404,20 +443,7 @@ object StreamsRepository {
                         if (!autoSelectTriggered) {
                             val allStreams = _uiState.value.groups.flatMap { it.streams }
                             if (allStreams.isNotEmpty()) {
-                                val evaluation = StreamAutoPlaySelector.evaluateAutoPlayStream(
-                                    streams = allStreams,
-                                    mode = autoPlayMode,
-                                    regexPattern = playerSettings.streamAutoPlayRegex,
-                                    source = playerSettings.streamAutoPlaySource,
-                                    installedAddonNames = installedAddonNames,
-                                    selectedAddons = playerSettings.streamAutoPlaySelectedAddons,
-                                    selectedPlugins = playerSettings.streamAutoPlaySelectedPlugins,
-                                    preferredBingeGroup = persistedBingeGroup,
-                                    preferBingeGroupInSelection = persistedBingeGroup != null,
-                                    bingeGroupOnly = false,
-                                    debridEnabled = debridSettings.canResolvePlayableLinks,
-                                    activeResolverProviderId = debridSettings.activeResolverProviderId,
-                                )
+                                val evaluation = evaluateFullAutoPlay(allStreams)
                                 if (evaluation.stream != null || !evaluation.hasPendingDebridCandidate) {
                                     autoSelectTriggered = true
                                     _uiState.update {
@@ -549,6 +575,7 @@ object StreamsRepository {
                     is StreamLoadCompletion.Addon -> {
                         val result = completion.group
                         publishAddonGroupAfterCacheCheck(result)
+                        tryFullAutoSelectAfterTimeout()
                     }
 
                     is StreamLoadCompletion.PluginScraper -> {
@@ -591,6 +618,7 @@ object StreamsRepository {
                                 emptyStateReason = updated.toEmptyStateReason(anyLoading),
                             )
                         }
+                        tryFullAutoSelectAfterTimeout()
                     }
 
                 }
@@ -726,20 +754,7 @@ object StreamsRepository {
             if (isDirectAutoPlayFlow && !autoSelectTriggered) {
                 autoSelectTriggered = true
                 val allStreams = _uiState.value.groups.flatMap { it.streams }
-                val evaluation = StreamAutoPlaySelector.evaluateAutoPlayStream(
-                    streams = allStreams,
-                    mode = autoPlayMode,
-                    regexPattern = playerSettings.streamAutoPlayRegex,
-                    source = playerSettings.streamAutoPlaySource,
-                    installedAddonNames = installedAddonNames,
-                    selectedAddons = playerSettings.streamAutoPlaySelectedAddons,
-                    selectedPlugins = playerSettings.streamAutoPlaySelectedPlugins,
-                    preferredBingeGroup = persistedBingeGroup,
-                    preferBingeGroupInSelection = persistedBingeGroup != null,
-                    bingeGroupOnly = false,
-                    debridEnabled = debridSettings.canResolvePlayableLinks,
-                    activeResolverProviderId = debridSettings.activeResolverProviderId,
-                )
+                val evaluation = evaluateFullAutoPlay(allStreams)
                 _uiState.update {
                     it.copy(
                         autoPlayStream = evaluation.stream,

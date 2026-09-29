@@ -2,16 +2,16 @@ package com.nuvio.app.features.plugins.runtime.network
 
 import co.touchlab.kermit.Logger
 import com.dokar.quickjs.QuickJs
-import com.dokar.quickjs.binding.function
+import com.dokar.quickjs.binding.asyncFunction
 import com.nuvio.app.core.logging.InAppLogger
 import com.nuvio.app.features.addons.httpRequestRaw
 import com.nuvio.app.features.plugins.runtime.host.HostModule
-import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
+import kotlin.coroutines.cancellation.CancellationException
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 
@@ -23,7 +23,9 @@ internal class FetchBridge : HostModule {
     private val json = Json { ignoreUnknownKeys = true }
 
     override fun register(runtime: QuickJs) {
-        runtime.function("__native_fetch") { args ->
+        // Async so that concurrent JS fetches (Promise.all, parallel awaits) overlap on the
+        // network instead of blocking the plugin thread one request at a time.
+        runtime.asyncFunction("__native_fetch") { args: Array<Any?> ->
             val url = args.getOrNull(0)?.toString() ?: ""
             val method = args.getOrNull(1)?.toString() ?: "GET"
             val headersJson = args.getOrNull(2)?.toString() ?: "{}"
@@ -32,6 +34,8 @@ internal class FetchBridge : HostModule {
             val followRedirects = args.getOrNull(5) as? Boolean ?: true
             try {
                 performNativeFetch(url, method, headersJson, bodyKind, body, followRedirects)
+            } catch (e: CancellationException) {
+                throw e
             } catch (t: Throwable) {
                 log.e(t) { "Fetch bridge error for $method $url" }
                 InAppLogger.error(
@@ -53,7 +57,7 @@ internal class FetchBridge : HostModule {
         }
     }
 
-    private fun performNativeFetch(
+    private suspend fun performNativeFetch(
         url: String,
         method: String,
         headersJson: String,
@@ -72,16 +76,14 @@ internal class FetchBridge : HostModule {
                 "bodyKind=$bodyKind bodyChars=${body.length} followRedirects=$followRedirects",
         )
 
-        val response = runBlocking {
-            httpRequestRaw(
-                method = method,
-                url = url,
-                headers = headers,
-                body = if (bodyKind == "text") body else "",
-                followRedirects = followRedirects,
-                bodyBytes = decodeBinaryBody(bodyKind, body),
-            )
-        }
+        val response = httpRequestRaw(
+            method = method,
+            url = url,
+            headers = headers,
+            body = if (bodyKind == "text") body else "",
+            followRedirects = followRedirects,
+            bodyBytes = decodeBinaryBody(bodyKind, body),
+        )
 
         val responseLogMessage = "$method ${InAppLogger.redactUrl(url)} -> ${response.status} ${response.statusText} " +
             "responseUrl=${InAppLogger.redactUrl(response.url)} bodyChars=${response.body.length} " +
