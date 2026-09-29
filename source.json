@@ -1,0 +1,40 @@
+{
+  "name": "Nuvio (arkita)",
+  "subtitle": "Personal Nuvio Enhanced builds.",
+  "description": "Unsigned builds of this fork, published by its Build Test IPA workflow.",
+  "website": "https://github.com/arkkita/nuviomobile-arkita",
+  "iconURL": "https://raw.githubusercontent.com/arkkita/nuviomobile-arkita/9c8bd37f9072bedcc2f84fcb6bb30a099165c601/iosApp/iosApp/Assets.xcassets/AppIcon.appiconset/app-icon-1024.png",
+  "tintColor": "#1E88E5",
+  "featuredApps": [
+    "com.nuvio.media"
+  ],
+  "apps": [
+    {
+      "name": "Nuvio (arkita)",
+      "bundleIdentifier": "com.nuvio.media",
+      "developerName": "arkita",
+      "subtitle": "Personal Nuvio Enhanced build.",
+      "localizedDescription": "Nuvio Enhanced built from this fork.",
+      "iconURL": "https://raw.githubusercontent.com/arkkita/nuviomobile-arkita/9c8bd37f9072bedcc2f84fcb6bb30a099165c601/iosApp/iosApp/Assets.xcassets/AppIcon.appiconset/app-icon-1024.png",
+      "tintColor": "#1E88E5",
+      "category": "entertainment",
+      "versions": [
+        {
+          "version": "0.5.4",
+          "buildVersion": "136",
+          "date": "2026-09-29T18:11:40Z",
+          "localizedDescription": "Release build from claude/nuvio-build-failure-frbs2n at 9c8bd37.\n",
+          "downloadURL": "https://github.com/arkkita/nuviomobile-arkita/releases/download/sideload-latest/nuvio-0.5.4-full-release.ipa",
+          "size": 68852838,
+          "sha256": "a01554f89b6fb95831abc38854ff748a80f43530d5bb64594d7e79035bdf84fa",
+          "minOSVersion": "16.1"
+        }
+      ],
+      "appPermissions": {
+        "entitlements": [],
+        "privacy": {}
+      }
+    }
+  ],
+  "news": []
+}
