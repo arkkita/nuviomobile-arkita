@@ -1839,8 +1839,13 @@ struct NativeNavContentView: View {
             }
             .zIndex(0)
 
+            // Once ready the gate draws nothing (ready requires its launch/profile overlays to be
+            // fully hidden), so drop it out of compositing instead of blending a full-screen
+            // transparent layer over the tabs every frame. The controller stays alive: profile
+            // switching flips isAppReady back to false and the gate becomes visible again.
             AppGateComposeView(appCoordinator: appCoordinator)
                 .ignoresSafeArea(.all)
+                .opacity(appCoordinator.isAppReady ? 0 : 1)
                 .allowsHitTesting(!appCoordinator.isAppReady)
                 .accessibilityHidden(appCoordinator.isAppReady)
                 .zIndex(1)

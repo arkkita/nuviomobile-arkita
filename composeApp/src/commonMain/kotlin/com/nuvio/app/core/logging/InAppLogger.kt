@@ -1,9 +1,16 @@
 package com.nuvio.app.core.logging
 
+import kotlinx.atomicfu.locks.SynchronizedObject
+import kotlinx.atomicfu.locks.synchronized
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.launch
 
 private const val DEFAULT_MAX_LOG_LINES = 3_000
 
@@ -35,8 +42,29 @@ object InAppLogger {
     val maxRetainedEntries: Int = DEFAULT_MAX_LOG_LINES
 
     private val maxLines = DEFAULT_MAX_LOG_LINES
+
+    // Appends go into a bounded ring buffer under bufferLock (O(1) per line). The public
+    // StateFlows below only receive a materialized snapshot while something is collecting them
+    // (the Debug Logs page), and a fresh snapshot is published as soon as a collector appears.
+    private val bufferLock = SynchronizedObject()
+    private val buffer = ArrayDeque<PendingInAppLogEntry>(DEFAULT_MAX_LOG_LINES)
+    private val publishScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val _entries = MutableStateFlow<List<InAppLogEntry>>(emptyList())
     private val _lines = MutableStateFlow<List<String>>(emptyList())
+
+    init {
+        publishScope.launch {
+            combine(_entries.subscriptionCount, _lines.subscriptionCount) { entryCollectors, lineCollectors ->
+                entryCollectors + lineCollectors > 0
+            }
+                .distinctUntilChanged()
+                .collect { observed ->
+                    if (observed) {
+                        synchronized(bufferLock) { publishSnapshotLocked() }
+                    }
+                }
+        }
+    }
 
     val entries: StateFlow<List<InAppLogEntry>> = _entries.asStateFlow()
 
@@ -56,23 +84,12 @@ object InAppLogger {
 
         val timestamp = currentInAppLogTimestamp()
         val safeTag = tag.trim().ifEmpty { "App" }
-        val line = buildString {
-            append(timestamp)
-            append(" [")
-            append(level.label)
-            append("] [")
-            append(safeTag)
-            append("] ")
-            append(trimmedMessage)
-        }
         appendEntry(
-            InAppLogEntry(
+            PendingInAppLogEntry(
                 timestamp = timestamp,
                 level = level,
                 tag = safeTag,
-                category = deriveCategory(safeTag),
                 message = trimmedMessage,
-                line = line,
             ),
         )
     }
@@ -137,27 +154,62 @@ object InAppLogger {
         return if (message.isBlank()) type else "$type: $message"
     }
 
-    fun dump(): String = entries.value.joinToString(separator = "\n") { it.line }
-
-    fun clear() {
-        _entries.value = emptyList()
-        syncLines(emptyList())
+    fun dump(): String = synchronized(bufferLock) {
+        buffer.joinToString(separator = "\n") { it.entry.line }
     }
 
-    private fun appendEntry(entry: InAppLogEntry) {
-        _entries.update { current ->
-            val updated = if (current.size < maxLines) {
-                current + entry
-            } else {
-                current.drop(current.size - maxLines + 1) + entry
-            }
-            syncLines(updated)
-            updated
+    fun clear() {
+        synchronized(bufferLock) {
+            buffer.clear()
+            _entries.value = emptyList()
+            _lines.value = emptyList()
         }
     }
 
-    private fun syncLines(entries: List<InAppLogEntry>) {
-        _lines.value = entries.map { it.line }
+    private fun appendEntry(entry: PendingInAppLogEntry) {
+        synchronized(bufferLock) {
+            while (buffer.size >= maxLines) {
+                buffer.removeFirst()
+            }
+            buffer.addLast(entry)
+            if (_entries.subscriptionCount.value > 0 || _lines.subscriptionCount.value > 0) {
+                publishSnapshotLocked()
+            }
+        }
+    }
+
+    // Must be called with bufferLock held, so snapshots are published in append order.
+    private fun publishSnapshotLocked() {
+        val snapshot = buffer.map { it.entry }
+        _entries.value = snapshot
+        _lines.value = snapshot.map { it.line }
+    }
+
+    private class PendingInAppLogEntry(
+        val timestamp: String,
+        val level: InAppLogLevel,
+        val tag: String,
+        val message: String,
+    ) {
+        // Line text and category are only built when the entry is actually read.
+        val entry: InAppLogEntry by lazy {
+            InAppLogEntry(
+                timestamp = timestamp,
+                level = level,
+                tag = tag,
+                category = InAppLogger.deriveCategory(tag),
+                message = message,
+                line = buildString {
+                    append(timestamp)
+                    append(" [")
+                    append(level.label)
+                    append("] [")
+                    append(tag)
+                    append("] ")
+                    append(message)
+                },
+            )
+        }
     }
 
     private fun deriveCategory(tag: String): String {

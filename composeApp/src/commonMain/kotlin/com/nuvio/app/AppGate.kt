@@ -36,6 +36,7 @@ import com.nuvio.app.core.ui.NativeTabBridge
 import com.nuvio.app.core.ui.NuvioTokens
 import com.nuvio.app.core.ui.PlatformBackHandler
 import com.nuvio.app.core.ui.nuvio
+import com.nuvio.app.features.addons.AddonRepository
 import com.nuvio.app.features.auth.AuthScreen
 import com.nuvio.app.features.membership.MemberAccessRepository
 import com.nuvio.app.features.profiles.AvatarRepository
@@ -122,7 +123,14 @@ internal fun AppGate(
         InAppLogger.info("App/Runtime", "Starting network/profile/avatar services")
         NetworkStatusRepository.ensureStarted()
         MemberAccessRepository.ensureStarted()
-        ProfileRepository.loadCachedProfiles()
+        val hasCachedProfiles = ProfileRepository.loadCachedProfiles()
+        if (hasCachedProfiles) {
+            // Start installed-addon manifest fetches for the cached active profile now, so they
+            // run during the intro hold instead of after the gate reaches Main. initialize() is
+            // idempotent, and selecting the same profile later is a no-op in onProfileChanged;
+            // picking a different profile resets and reloads addons as before.
+            AddonRepository.initialize()
+        }
         AvatarRepository.fetchAvatars()
     }
 

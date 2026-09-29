@@ -141,7 +141,7 @@ internal fun MainTabsDestination(
                         actions = tabActions,
                         modifier = Modifier
                             .fillMaxSize()
-                            .then(if (tabsRouteActive && navBarStyleSetting != NavBarStyle.CLASSIC) Modifier.hazeSource(state = navBarHazeState) else Modifier)
+                            .then(if (tabsRouteActive && !useNativeBottomTabs && navBarStyleSetting != NavBarStyle.CLASSIC) Modifier.hazeSource(state = navBarHazeState) else Modifier)
                             .then(if (tabsRouteActive && navBarStyleSetting == NavBarStyle.ADAPTIVE) Modifier.nestedScroll(navBarScrollState.nestedScrollConnection) else Modifier)
                             .padding(innerPadding),
                     )

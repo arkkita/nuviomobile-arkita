@@ -325,7 +325,9 @@ internal fun HomeHeroSection(
             val artworkBaseScale = if (isCardStyle) 1f else HERO_BACKGROUND_SCALE
             val heroWidthPx = with(LocalDensity.current) { maxWidth.toPx() }
             val heroHeightPx = with(LocalDensity.current) { layout.heroHeight.toPx() }
-            val scrollOffsetPx by remember(listState, heroHeightPx) {
+            // Kept as a State and only read inside graphicsLayer {} (draw phase), so scrolling the
+            // home list updates the hero's parallax without recomposing the hero every pixel.
+            val heroScrollOffsetState = remember(listState, heroHeightPx) {
                 derivedStateOf {
                     when {
                         listState == null -> 0f
@@ -334,8 +336,9 @@ internal fun HomeHeroSection(
                     }
                 }
             }
-            val heroScrollScale = heroBackgroundScrollScale(scrollOffsetPx)
-            val heroScrollTranslationY = heroBackgroundScrollTranslationY(scrollOffsetPx)
+            val isHeroScrolledAway by remember(heroScrollOffsetState, heroHeightPx) {
+                derivedStateOf { heroScrollOffsetState.value >= heroHeightPx * 0.6f }
+            }
             val currentPage = pagerState.currentPage
             val visiblePages = listOf(
                 currentPage,
@@ -483,11 +486,17 @@ internal fun HomeHeroSection(
                                         .graphicsLayer {
                                             alpha = layer.visibility
                                             translationX = -layer.offset * heroWidthPx * artworkParallax
-                                            translationY = if (isCardStyle) 0f else heroScrollTranslationY
-                                            scaleX = artworkBaseScale *
-                                                if (isCardStyle) 1f else heroScrollScale
-                                            scaleY = artworkBaseScale *
-                                                if (isCardStyle) 1f else heroScrollScale
+                                            if (isCardStyle) {
+                                                translationY = 0f
+                                                scaleX = artworkBaseScale
+                                                scaleY = artworkBaseScale
+                                            } else {
+                                                val scrollOffsetPx = heroScrollOffsetState.value
+                                                val heroScrollScale = heroBackgroundScrollScale(scrollOffsetPx)
+                                                translationY = heroBackgroundScrollTranslationY(scrollOffsetPx)
+                                                scaleX = artworkBaseScale * heroScrollScale
+                                                scaleY = artworkBaseScale * heroScrollScale
+                                            }
                                         },
                                     alignment = if (layout.isTablet) Alignment.TopCenter else Alignment.Center,
                                     contentScale = ContentScale.Crop,
@@ -506,7 +515,6 @@ internal fun HomeHeroSection(
                             )
                             val currentPageOffset = pagerState.currentPageOffsetFraction
                             val currentPageVisibility = (1f - abs(currentPageOffset)).coerceIn(0f, 1f)
-                            val isHeroScrolledAway = scrollOffsetPx >= heroHeightPx * 0.6f
                             HeroTrailerPlayerSurface(
                                 sourceUrl = heroTrailerSourceUrl,
                                 sourceAudioUrl = heroTrailerPlaybackSource?.audioUrl,
@@ -520,9 +528,17 @@ internal fun HomeHeroSection(
                                     .graphicsLayer {
                                         alpha = trailerReadyAlpha * currentPageVisibility
                                         translationX = -currentPageOffset * heroWidthPx * artworkParallax
-                                        translationY = if (isCardStyle) 0f else heroScrollTranslationY
-                                        scaleX = artworkBaseScale * if (isCardStyle) 1f else heroScrollScale
-                                        scaleY = artworkBaseScale * if (isCardStyle) 1f else heroScrollScale
+                                        if (isCardStyle) {
+                                            translationY = 0f
+                                            scaleX = artworkBaseScale
+                                            scaleY = artworkBaseScale
+                                        } else {
+                                            val scrollOffsetPx = heroScrollOffsetState.value
+                                            val heroScrollScale = heroBackgroundScrollScale(scrollOffsetPx)
+                                            translationY = heroBackgroundScrollTranslationY(scrollOffsetPx)
+                                            scaleX = artworkBaseScale * heroScrollScale
+                                            scaleY = artworkBaseScale * heroScrollScale
+                                        }
                                     },
                                 onReady = {
                                     if (!heroTrailerFinished) heroTrailerReady = true

@@ -22,11 +22,13 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
 import kotlin.math.absoluteValue
 import kotlin.random.Random
 
@@ -79,48 +81,89 @@ object HomeRepository {
 
         activeJob?.cancel()
         _uiState.update { it.copy(isLoading = true, errorMessage = null) }
+        val sectionsAtStart = cachedSections
         activeJob = scope.launch {
             val prioritizedRequests = prioritizeDefinitions(
                 definitions = requests,
                 snapshot = HomeCatalogSettingsRepository.snapshot(),
             )
             val loadedSections = linkedMapOf<String, HomeCatalogSection>().apply {
-                putAll(cachedSections)
+                putAll(sectionsAtStart)
+            }
+            // Sections already loaded this session for the exact same catalog descriptor are kept
+            // as-is on a non-forced refresh (e.g. another addon's manifest arriving); only new or
+            // changed catalogs are fetched. Forced refreshes still refetch everything.
+            val pendingRequests = if (force) {
+                prioritizedRequests
+            } else {
+                prioritizedRequests.filterNot { request -> sectionsAtStart.containsKey(request.cacheKey) }
             }
             var firstErrorMessage: String? = null
-            var batchIndex = 0
 
-            prioritizedRequests.chunked(HOME_CATALOG_FETCH_BATCH_SIZE).forEach { batch ->
-                if (activeRequestKey != requestKey) return@launch
-                val results = batch.map { request ->
-                    async {
-                        request to runCatching {
-                            request.toSection(forceRefresh = force)
+            if (pendingRequests.isNotEmpty()) {
+                // Bounded-concurrency pool: up to HOME_CATALOG_FETCH_BATCH_SIZE requests are in
+                // flight at any time, and a new one starts as soon as any finishes (instead of each
+                // batch waiting for its slowest request). Results are committed strictly in
+                // prioritized order, so rows still fill in top-down without reordering.
+                val fetchPermits = Semaphore(HOME_CATALOG_FETCH_BATCH_SIZE)
+                val completions = Channel<Pair<Int, HomeSectionFetchOutcome>>(Channel.UNLIMITED)
+                launch {
+                    pendingRequests.forEachIndexed { index, request ->
+                        fetchPermits.acquire()
+                        launch {
+                            val result = try {
+                                runCatching {
+                                    request.toSection(forceRefresh = force)
+                                }
+                            } finally {
+                                fetchPermits.release()
+                            }
+                            completions.trySend(
+                                index to HomeSectionFetchOutcome(
+                                    section = result.getOrNull(),
+                                    errorMessage = result.exceptionOrNull()?.message,
+                                ),
+                            )
                         }
                     }
-                }.awaitAll()
-
-                if (activeRequestKey != requestKey) return@launch
-
-                results.mapNotNull { (request, result) ->
-                    result.getOrNull()?.let { section -> request.cacheKey to section }
-                }.forEach { (cacheKey, section) ->
-                    loadedSections[cacheKey] = section
                 }
-                if (firstErrorMessage == null) {
-                    firstErrorMessage = results.firstNotNullOfOrNull { (_, result) ->
-                        result.exceptionOrNull()?.message
+
+                val outcomes = arrayOfNulls<HomeSectionFetchOutcome>(pendingRequests.size)
+                var committedCount = 0
+                var lastPublishedCount = 0
+                while (committedCount < pendingRequests.size) {
+                    val (index, outcome) = completions.receive()
+                    if (activeRequestKey != requestKey) return@launch
+                    outcomes[index] = outcome
+
+                    val committedBefore = committedCount
+                    while (committedCount < pendingRequests.size) {
+                        val next = outcomes[committedCount] ?: break
+                        outcomes[committedCount] = null
+                        next.section?.let { section ->
+                            loadedSections[pendingRequests[committedCount].cacheKey] = section
+                        }
+                        if (firstErrorMessage == null) {
+                            firstErrorMessage = next.errorMessage
+                        }
+                        committedCount++
+                    }
+                    if (committedCount == committedBefore) continue
+
+                    cachedSections = loadedSections.toMap()
+                    lastErrorMessage = firstErrorMessage
+                    if (committedCount == pendingRequests.size) break
+                    if (
+                        committedCount <= HOME_CATALOG_FETCH_BATCH_SIZE ||
+                        committedCount - lastPublishedCount >= HOME_CATALOG_FETCH_BATCH_SIZE
+                    ) {
+                        publishCurrentState(
+                            isLoading = true,
+                            requestKey = requestKey,
+                        )
+                        lastPublishedCount = committedCount
                     }
                 }
-                cachedSections = loadedSections.toMap()
-                lastErrorMessage = firstErrorMessage
-                if (batchIndex == 0 || (batchIndex + 1) % HOME_CATALOG_PUBLISH_INTERVAL == 0) {
-                    publishCurrentState(
-                        isLoading = true,
-                        requestKey = requestKey,
-                    )
-                }
-                batchIndex++
             }
 
             if (activeRequestKey != requestKey) return@launch
@@ -445,7 +488,11 @@ private const val HOME_COLLECTION_HERO_SOURCE_LIMIT = 6
 private const val HOME_COLLECTION_HERO_SOURCE_ITEM_LIMIT = 8
 private const val HOME_CATALOG_FETCH_BATCH_SIZE = 4
 private const val HOME_CATALOG_PREVIEW_FETCH_LIMIT = 18
-private const val HOME_CATALOG_PUBLISH_INTERVAL = 2
+
+private class HomeSectionFetchOutcome(
+    val section: HomeCatalogSection?,
+    val errorMessage: String?,
+)
 
 private fun prioritizeDefinitions(
     definitions: List<HomeCatalogDefinition>,

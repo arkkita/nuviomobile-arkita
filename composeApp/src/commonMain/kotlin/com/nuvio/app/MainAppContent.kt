@@ -300,9 +300,6 @@ internal fun MainAppContent(
             LibraryRepository.ensureLoaded()
             LibraryRepository.uiState
         }.collectAsStateWithLifecycle()
-        LaunchedEffect(libraryUiState.items) {
-            warmLibraryReleaseSchedule(libraryUiState.items)
-        }
         val liveTvUiState by remember {
             LiveTvRepository.ensureLoaded()
             LiveTvRepository.uiState
@@ -386,6 +383,13 @@ internal fun MainAppContent(
     }
     var initialHomeReady by rememberSaveable(ownsAppRuntime, appContentGeneration) {
         mutableStateOf(!ownsAppRuntime)
+    }
+    // Deferred until the first home catalog has rendered (or the 5s fallback below fires) so the
+    // per-series metadata fetches don't compete with home's first paint. LibraryScreen and
+    // Profile Insights still warm the same cache themselves when they are shown earlier.
+    LaunchedEffect(libraryUiState.items, initialHomeReady) {
+        if (!initialHomeReady) return@LaunchedEffect
+        warmLibraryReleaseSchedule(libraryUiState.items)
     }
     var offlineLaunchRouteHandled by rememberSaveable { mutableStateOf(false) }
     var networkToastBaselineReady by rememberSaveable { mutableStateOf(false) }

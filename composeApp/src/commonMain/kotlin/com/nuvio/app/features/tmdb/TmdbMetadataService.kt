@@ -13,6 +13,8 @@ import com.nuvio.app.features.details.OmdbEpisodeRatingsService
 import com.nuvio.app.features.details.PersonDetail
 import com.nuvio.app.features.home.MetaPreview
 import com.nuvio.app.features.home.PosterShape
+import kotlinx.atomicfu.locks.SynchronizedObject
+import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -35,6 +37,9 @@ object TmdbMetadataService {
     private val log = Logger.withTag("TmdbMetadata")
     private val json = Json { ignoreUnknownKeys = true }
 
+    // enrichmentCache and episodeCache are hit concurrently from Dispatchers.Default by metadata
+    // fetches; every access goes through cacheLock.
+    private val cacheLock = SynchronizedObject()
     private val enrichmentCache = mutableMapOf<String, TmdbEnrichment>()
     private val episodeCache = mutableMapOf<String, Map<Pair<Int, Int>, TmdbEpisodeEnrichment>>()
     private val moreLikeThisCache = mutableMapOf<String, MoreLikeThisPage>()
@@ -967,7 +972,7 @@ object TmdbMetadataService {
     ): TmdbEnrichment? = withContext(Dispatchers.Default) {
         val normalizedLanguage = normalizeTmdbLanguage(language)
         val cacheKey = "$tmdbId:$mediaType:$normalizedLanguage"
-        enrichmentCache[cacheKey]?.let { return@withContext it }
+        synchronized(cacheLock) { enrichmentCache[cacheKey] }?.let { return@withContext it }
 
         val numericId = tmdbId.toIntOrNull() ?: return@withContext null
         val includeImageLanguage = tmdbImageLanguages(normalizedLanguage)
@@ -1118,7 +1123,7 @@ object TmdbMetadataService {
         )
 
         if (!enrichment.hasContent()) return@withContext null
-        enrichmentCache[cacheKey] = enrichment
+        synchronized(cacheLock) { enrichmentCache[cacheKey] = enrichment }
         enrichment
     }
 
@@ -1193,7 +1198,7 @@ object TmdbMetadataService {
         if (normalizedSeasons.isEmpty()) return@withContext emptyMap()
 
         val cacheKey = "$numericId:${normalizedSeasons.joinToString(",")}:$normalizedLanguage"
-        episodeCache[cacheKey]?.let { return@withContext it }
+        synchronized(cacheLock) { episodeCache[cacheKey] }?.let { return@withContext it }
 
         val pairs = coroutineScope {
             normalizedSeasons.map { season ->
@@ -1223,7 +1228,7 @@ object TmdbMetadataService {
 
         val merged = pairs.fold(emptyMap<Pair<Int, Int>, TmdbEpisodeEnrichment>()) { acc, value -> acc + value }
         if (merged.isNotEmpty()) {
-            episodeCache[cacheKey] = merged
+            synchronized(cacheLock) { episodeCache[cacheKey] = merged }
         }
         merged
     }
